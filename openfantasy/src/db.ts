@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import type { Market } from "./polymarket.js";
 
 export const db = new Database(process.env.DB_PATH ?? "openfantasy.db");
 db.pragma("journal_mode = WAL");
@@ -80,6 +81,41 @@ const selectUser = db.prepare("SELECT id FROM users WHERE phone = ?");
 const insertMessage = db.prepare(
   "INSERT INTO messages (user_id, role, text) VALUES (?, ?, ?)",
 );
+
+const upsertMarketStmt = db.prepare(`
+  INSERT INTO markets (market_id, question, outcomes, last_prices, updated_at)
+  VALUES (?, ?, ?, ?, datetime('now'))
+  ON CONFLICT(market_id) DO UPDATE SET
+    question    = excluded.question,
+    outcomes    = excluded.outcomes,
+    last_prices = excluded.last_prices,
+    updated_at  = excluded.updated_at
+`);
+
+export function upsertMarket(market: Market): void {
+  upsertMarketStmt.run(
+    market.id,
+    market.question,
+    JSON.stringify(market.outcomes),
+    JSON.stringify(market.prices),
+  );
+}
+
+const selectRecent = db.prepare(
+  "SELECT role, text FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+);
+
+// Oldest first, ready to send to the LLM.
+export function getRecentMessages(
+  userId: number,
+  limit: number,
+): { role: "user" | "assistant"; text: string }[] {
+  const rows = selectRecent.all(userId, limit) as {
+    role: "user" | "assistant";
+    text: string;
+  }[];
+  return rows.reverse();
+}
 
 export function getOrCreateUserId(phone: string): number {
   upsertUser.run(phone);
