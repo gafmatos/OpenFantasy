@@ -75,19 +75,54 @@ export async function getMarket(id: string): Promise<Market | null> {
 }
 
 export async function searchMarkets(query: string): Promise<Market[]> {
-    const res = await fetch(`${GAMMA_URL}/public-search?q=${encodeURIComponent(query)}`, {
+    // Filler words like "odds" get matched literally by Polymarket's search
+    // ("Odds BK" markets), so search with the meaningful words only.
+    const tokens = queryTokens(query);
+    const q = tokens.length > 0 ? tokens.join(" ") : query;
+
+    // events_status=active skips finished events before ranking; without it the
+    // top 5 events are often all closed and every market gets filtered out.
+    const res = await fetch(`${GAMMA_URL}/public-search?q=${encodeURIComponent(q)}&events_status=active`, {
         signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) throw new Error(`Polymarket search failed: ${res.status}`);
 
     const body = (await res.json()) as { events?: RawEvent[] };
-    const markets: Market[] = [];
+    const scored: { market: Market; score: number }[] = [];
     for (const event of body.events ?? []) {
         for (const raw of event.markets ?? []) {
             const market = parseMarket(raw);
-            if (market) markets.push(market);
-            if (markets.length === MAX_RESULTS) return markets;
+            if (!market) continue;
+            scored.push({ market, score: relevance(tokens, `${market.question} ${event.title ?? ""}`) });
         }
     }
-    return markets;
+
+    // An event lists one market per team/option in the API's own order, so the
+    // first few are not the ones asked about. Rank by overlap with the query
+    // (stable sort keeps API order for ties).
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0]?.score ?? 0;
+    return scored
+        .filter((s) => best === 0 || s.score > 0)
+        .slice(0, MAX_RESULTS)
+        .map((s) => s.market);
+}
+
+// "win" is kept on purpose: it separates "win the championship" from "advance to the quarters".
+const STOPWORDS = new Set([
+    "odds", "the", "will", "what", "are", "is", "of", "by", "in", "on", "at", "a", "an",
+    "to", "for", "chance", "chances", "probability", "and", "or", "does", "do",
+]);
+
+function words(text: string): string[] {
+    return text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+function queryTokens(query: string): string[] {
+    return words(query).filter((w) => w.length >= 2 && !STOPWORDS.has(w));
+}
+
+function relevance(tokens: string[], text: string): number {
+    const present = new Set(words(text));
+    return tokens.filter((t) => present.has(t)).length;
 }
