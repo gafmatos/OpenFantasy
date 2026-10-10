@@ -17,5 +17,10 @@ const app = await Spectrum({
 for await (const [space, message] of app.messages) {
   if (message.content.type === "text") {
     await space.send(`echo: ${message.content.text}`);
+
+    if (message.content.text == "123") {
+      await space.send('HI 123 123 123 123 123 123 123')
+    }
+
   }
 }
