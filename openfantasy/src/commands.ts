@@ -23,7 +23,12 @@ const pendingCommand = new Map<number, string>();
 const lastList = new Map<number, Market[]>();
 
 const HELP =
-  "Commands: mkt <keywords>, bet <#> <yes/no> <$>, leaderboard [league], portfolio, join <code>, create <name>.";
+  `Commands: mkt <keywords>, 
+  bet <#> <yes/no> <$>, 
+  leaderboard [league], 
+  portfolio, 
+  join <code>, 
+  create <name>.`;
 
 function runLeagueCommand(userId: number, verb: string, arg: string): string {
   const player = getPlayer(userId);

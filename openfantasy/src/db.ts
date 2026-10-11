@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import type { Market } from "./polymarket.js";
 
+// May remove process.env.path, currently only relying on the local
 export const db = new Database(process.env.DB_PATH ?? "openfantasy.db");
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
@@ -74,9 +75,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_picks_open ON picks(league_id, status);
 `);
 
+
+
+
 const upsertUser = db.prepare(
   "INSERT INTO users (phone) VALUES (?) ON CONFLICT(phone) DO NOTHING",
 );
+
+// selects id where phone equals the parameter from selectUser.get(<parameter>);
 const selectUser = db.prepare("SELECT id FROM users WHERE phone = ?");
 const insertMessage = db.prepare(
   "INSERT INTO messages (user_id, role, text) VALUES (?, ?, ?)",
