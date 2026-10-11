@@ -23,12 +23,14 @@ What this means for how you work here:
 - Do not add features, abstractions or dependencies beyond the current phase. If a task looks like it will take more than an hour, say so and propose a smaller version.
 - When something is uncertain, say what you verified and what you assumed. Wrong confidence costs more than a question at this pace.
 
-## Current status (Saturday, about 1:40 PM)
+## Current status (Saturday, phase 1 code complete)
 
 - Photon account created, Pro plan active, project created in the dashboard.
-- The project was scaffolded with `npm create spectrum-project@latest openfantasy -- --projectId <id> --providers imessage --yes`, and the project files have been generated. Not yet confirmed: that `.env` has a value for `PROJECT_SECRET`. If the scaffolder's cloud login did not complete, that line is empty and the secret must be copied from the Photon dashboard's Settings page.
-- The generated `src/index.ts` is an echo bot. Nothing else is built.
-- Next checkpoint: text the agent from a phone and get `echo: <message>` back.
+- Scaffolded project runs: `npm run start` loads `.env` (the script uses `tsx --env-file=.env`), and the echo bot replies on Gabriel's phone.
+- `src/db.ts` opens `openfantasy.db` (override with `DB_PATH`, gitignored), creates all seven tables from the data model, and exports `getOrCreateUserId(phone)` and `logMessage(userId, role, text)`.
+- `src/index.ts` is still the echo bot. It now finds or creates the user by `message.sender.id` and logs each inbound text and each outgoing reply to `messages`.
+- Verified: `tsc --noEmit` is clean, and a script run against a scratch database created all tables, deduplicated the user and wrote a message row. Not yet verified: logging from a real text over iMessage (check with `sqlite3 openfantasy.db "select * from messages"` after texting).
+- Next checkpoint to close phase 1: text the agent, confirm the reply and the two rows in `messages`. Then phase 2: Polymarket search and the LLM tool loop.
 
 Not decided yet: the LLM provider, the team size and who owns which part.
 
