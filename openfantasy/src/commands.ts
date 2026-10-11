@@ -2,6 +2,7 @@ import {
   createLeague,
   findMemberLeague,
   getLeaderboard,
+  getHistory,
   getLeagueMemberNames,
   getPlayer,
   getPortfolio,
@@ -22,13 +23,17 @@ const pendingCommand = new Map<number, string>();
 // The numbered list from the player's last `mkt`, so `bet 1 ...` can refer to it.
 const lastList = new Map<number, Market[]>();
 
-const HELP =
-  `Commands: mkt <keywords>, 
-  bet <#> <yes/no> <$>, 
-  leaderboard [league], 
-  portfolio, 
-  join <code>, 
-  create <name>.`;
+// A blank line between commands keeps the list readable in a text thread.
+const HELP = [
+  "Here's what I understand:",
+  "mkt <keywords> - find open markets, like: mkt fed rate cut",
+  "bet <#> <yes/no> <$> - bet play money on a market from your last list, like: bet 1 yes 200",
+  "portfolio - your cash and open picks",
+  "history - your wins, losses and net profit",
+  "leaderboard [league] - how everyone in your league ranks",
+  "create <name> - start a new league",
+  "join <code> - join a friend's league",
+].join("\n\n");
 
 function runLeagueCommand(userId: number, verb: string, arg: string): string {
   const player = getPlayer(userId);
@@ -137,6 +142,21 @@ async function runPortfolio(userId: number): Promise<string> {
   return `${money0(cash)} cash.\n${lines.join("\n")}${fresh ? "" : STALE}`;
 }
 
+const signed = (n: number) => `${n >= 0 ? "+" : "-"}${money0(Math.abs(n))}`;
+
+function runHistory(userId: number): string {
+  const player = getPlayer(userId);
+  if (!player.league) return "Join or create a league first.";
+  const rows = getHistory(userId, player.league.id);
+  if (rows.length === 0) return "No settled picks yet. Your open ones show in portfolio.";
+  const wins = rows.filter((r) => r.won).length;
+  const net = rows.reduce((sum, r) => sum + r.payout - r.stake, 0);
+  const lines = rows
+    .slice(0, 5)
+    .map((r) => `${r.won ? "W" : "L"} ${r.question} ${r.outcome}, ${signed(r.payout - r.stake)}`);
+  return `Record: ${wins}-${rows.length - wins}, net ${signed(net)}.\n${lines.join("\n")}`;
+}
+
 // Exact-word commands handled before the LLM: faster, and one less failure
 // mode in the demo. Returns the reply, or null to fall through to the LLM.
 export async function handleCommand(userId: number, text: string): Promise<string | null> {
@@ -187,6 +207,9 @@ export async function handleCommand(userId: number, text: string): Promise<strin
     case "portfolio":
     case "pf":
       return rest ? null : runPortfolio(userId);
+    case "history":
+    case "record":
+      return rest ? null : runHistory(userId);
     case "help":
       return rest ? null : HELP;
   }

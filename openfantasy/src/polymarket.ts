@@ -7,6 +7,7 @@ type RawMarket = {
     closed: boolean;
     acceptingOrders: boolean;
     spread?: number;         // may be missing on some markets
+    umaResolutionStatus?: string;
 };
 
 type RawEvent = {
@@ -72,6 +73,36 @@ export async function getMarket(id: string): Promise<Market | null> {
     });
     if (!res.ok) throw new Error(`Polymarket market ${id} failed: ${res.status}`);
     return parseMarket((await res.json()) as RawMarket);
+}
+
+export type Resolution =
+    | { resolved: false }
+    | { resolved: true; winningOutcome: string };
+
+// parseMarket drops closed markets, so settlement reads the raw record. A market
+// counts as resolved only when UMA says so and exactly one outcome is priced 1,
+// which keeps disputed or voided (50/50) markets open instead of guessing.
+export async function getResolution(id: string): Promise<Resolution> {
+    const res = await fetch(`${GAMMA_URL}/markets/${encodeURIComponent(id)}`, {
+        signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) throw new Error(`Polymarket market ${id} failed: ${res.status}`);
+    const raw = (await res.json()) as RawMarket;
+    if (raw.closed !== true || raw.umaResolutionStatus !== "resolved") return { resolved: false };
+
+    let outcomes: string[];
+    let prices: number[];
+    try {
+        outcomes = JSON.parse(raw.outcomes);
+        prices = (JSON.parse(raw.outcomePrices) as string[]).map(Number);
+    } catch {
+        return { resolved: false };
+    }
+    if (outcomes.length === 0 || outcomes.length !== prices.length) return { resolved: false };
+    const winners = prices.flatMap((p, i) => (p === 1 ? [i] : []));
+    const rest = prices.filter((p) => p !== 1);
+    if (winners.length !== 1 || rest.some((p) => p !== 0)) return { resolved: false };
+    return { resolved: true, winningOutcome: outcomes[winners[0]!]! };
 }
 
 // Most active open markets right now. UNVERIFIED against the live API: the

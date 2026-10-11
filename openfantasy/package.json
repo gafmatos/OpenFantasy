@@ -8,6 +8,7 @@
     "dev": "tsx watch --env-file=.env src/index.ts"
   },
   "dependencies": {
+    "@spectrum-ts/imessage-local": "^12.10.1",
     "better-sqlite3": "^13.0.3",
     "spectrum-ts": "^12.10.1"
   },

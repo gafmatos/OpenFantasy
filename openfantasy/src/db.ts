@@ -399,6 +399,99 @@ export function findMemberLeague(
   return row ?? null;
 }
 
+export type Settled = {
+  userId: number;
+  phone: string;
+  question: string;
+  outcome: string;
+  stake: number;
+  payout: number;
+  won: boolean;
+  cash: number;
+};
+
+// One transaction. Only 'open' picks are touched, so running it twice for the
+// same market pays nobody twice. Winners get shares x $1; losers get nothing.
+export const settleMarket = db.transaction(
+  (marketId: string, winningOutcome: string): Settled[] => {
+    const picks = db
+      .prepare(
+        `SELECT p.id, p.user_id, p.league_id, p.question, p.outcome, p.stake, p.shares, u.phone
+         FROM picks p JOIN users u ON u.id = p.user_id
+         WHERE p.market_id = ? AND p.status = 'open'`,
+      )
+      .all(marketId) as {
+      id: number;
+      user_id: number;
+      league_id: number;
+      question: string;
+      outcome: string;
+      stake: number;
+      shares: number;
+      phone: string;
+    }[];
+
+    const settled: Settled[] = [];
+    for (const p of picks) {
+      const won = p.outcome === winningOutcome;
+      const payout = won ? p.shares : 0;
+      db.prepare("UPDATE picks SET status = ?, payout = ? WHERE id = ?").run(
+        won ? "won" : "lost",
+        payout,
+        p.id,
+      );
+      db.prepare(
+        "UPDATE memberships SET cash = cash + ? WHERE user_id = ? AND league_id = ?",
+      ).run(payout, p.user_id, p.league_id);
+      const m = db
+        .prepare("SELECT cash FROM memberships WHERE user_id = ? AND league_id = ?")
+        .get(p.user_id, p.league_id) as { cash: number };
+      settled.push({
+        userId: p.user_id,
+        phone: p.phone,
+        question: p.question,
+        outcome: p.outcome,
+        stake: p.stake,
+        payout,
+        won,
+        cash: m.cash,
+      });
+    }
+    db.prepare(
+      "UPDATE markets SET resolved = 1, winning_outcome = ? WHERE market_id = ?",
+    ).run(winningOutcome, marketId);
+    return settled;
+  },
+);
+
+export type HistoryRow = {
+  question: string;
+  outcome: string;
+  stake: number;
+  payout: number;
+  won: boolean;
+};
+
+// Settled picks for one player in one league, newest first.
+export function getHistory(userId: number, leagueId: number): HistoryRow[] {
+  const rows = db
+    .prepare(
+      `SELECT question, outcome, stake, COALESCE(payout, 0) AS payout, status
+       FROM picks
+       WHERE user_id = ? AND league_id = ? AND status IN ('won', 'lost')
+       ORDER BY id DESC`,
+    )
+    .all(userId, leagueId) as (Omit<HistoryRow, "won"> & { status: string })[];
+  return rows.map((r) => ({ ...r, won: r.status === "won" }));
+}
+
+export function allOpenMarketIds(): string[] {
+  const rows = db
+    .prepare("SELECT DISTINCT market_id FROM picks WHERE status = 'open'")
+    .all() as { market_id: string }[];
+  return rows.map((r) => r.market_id);
+}
+
 export function openMarketIds(leagueId: number): string[] {
   const rows = db
     .prepare(

@@ -31,8 +31,8 @@ Rules:
 - If several markets match, show at most three and ask which one the player means.
 - If nothing matches, say so and suggest different keywords.
 - To place a pick, call propose_pick with the market_id, outcome and stake the player gave. If they have not given a stake, ask for it. When it succeeds, repeat its message and tell them to reply yes to lock it in. You cannot confirm a pick yourself.
-- You cannot show a leaderboard or portfolio. Tell the player to text "leaderboard" or "portfolio".
-- Commands the player can text: mkt <keywords>, bet <#> <yes/no> <$>, leaderboard, portfolio.`;
+- You cannot show a leaderboard, portfolio or win/loss record. Tell the player to text "leaderboard", "portfolio" or "history".
+- Commands the player can text: mkt <keywords>, bet <#> <yes/no> <$>, leaderboard, portfolio, history.`;
 
 type ToolCall = {
   id: string;
