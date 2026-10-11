@@ -122,6 +122,298 @@ export function getOrCreateUserId(phone: string): number {
   return (selectUser.get(phone) as { id: number }).id;
 }
 
+export type Player = {
+  name: string | null;
+  league: { id: number; name: string; joinCode: string; cash: number } | null;
+};
+
+const selectPlayer = db.prepare(`
+  SELECT u.name AS name, l.id AS leagueId, l.name AS leagueName,
+         l.join_code AS joinCode, m.cash AS cash
+  FROM users u
+  LEFT JOIN leagues l ON l.id = u.active_league_id
+  LEFT JOIN memberships m ON m.user_id = u.id AND m.league_id = l.id
+  WHERE u.id = ?
+`);
+
+export function getPlayer(userId: number): Player {
+  const r = selectPlayer.get(userId) as {
+    name: string | null;
+    leagueId: number | null;
+    leagueName: string | null;
+    joinCode: string | null;
+    cash: number | null;
+  };
+  return {
+    name: r.name,
+    league:
+      r.leagueId === null
+        ? null
+        : {
+            id: r.leagueId,
+            name: r.leagueName!,
+            joinCode: r.joinCode!,
+            cash: r.cash!,
+          },
+  };
+}
+
+export function setName(userId: number, name: string): void {
+  db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, userId);
+}
+
+// No 0/O/1/I so codes survive being read aloud or retyped.
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function randomCode(): string {
+  let code = "";
+  for (let i = 0; i < 5; i++) {
+    code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+export type LeagueResult =
+  | { ok: true; leagueId: number; name: string; joinCode: string; cash: number }
+  | { ok: false; error: string };
+
+const STARTING_CASH = 1000;
+
+export const createLeague = db.transaction(
+  (userId: number, name: string): LeagueResult => {
+    let joinCode = randomCode();
+    while (db.prepare("SELECT 1 FROM leagues WHERE join_code = ?").get(joinCode)) {
+      joinCode = randomCode();
+    }
+    const { lastInsertRowid } = db
+      .prepare(
+        "INSERT INTO leagues (name, join_code, starting_cash, created_by) VALUES (?, ?, ?, ?)",
+      )
+      .run(name, joinCode, STARTING_CASH, userId);
+    const leagueId = Number(lastInsertRowid);
+    db.prepare(
+      "INSERT INTO memberships (user_id, league_id, cash) VALUES (?, ?, ?)",
+    ).run(userId, leagueId, STARTING_CASH);
+    db.prepare("UPDATE users SET active_league_id = ? WHERE id = ?").run(
+      leagueId,
+      userId,
+    );
+    return { ok: true, leagueId, name, joinCode, cash: STARTING_CASH };
+  },
+);
+
+export const joinLeague = db.transaction(
+  (userId: number, code: string): LeagueResult => {
+    const league = db
+      .prepare(
+        "SELECT id, name, join_code, starting_cash FROM leagues WHERE join_code = ?",
+      )
+      .get(code.trim().toUpperCase()) as
+      | { id: number; name: string; join_code: string; starting_cash: number }
+      | undefined;
+    if (!league) return { ok: false, error: "no league has that code" };
+
+    const existing = db
+      .prepare("SELECT 1 FROM memberships WHERE user_id = ? AND league_id = ?")
+      .get(userId, league.id);
+    if (existing) return { ok: false, error: "already in that league" };
+
+    db.prepare(
+      "INSERT INTO memberships (user_id, league_id, cash) VALUES (?, ?, ?)",
+    ).run(userId, league.id, league.starting_cash);
+    db.prepare("UPDATE users SET active_league_id = ? WHERE id = ?").run(
+      league.id,
+      userId,
+    );
+    return {
+      ok: true,
+      leagueId: league.id,
+      name: league.name,
+      joinCode: league.join_code,
+      cash: league.starting_cash,
+    };
+  },
+);
+
+export type PlaceResult =
+  | { ok: true; shares: number; cash: number }
+  | { ok: false; error: string };
+
+// One transaction: check cash, deduct the stake, insert the pick. better-sqlite3
+// runs it synchronously, so two quick texts cannot spend the same money.
+export const placePick = db.transaction(
+  (p: {
+    userId: number;
+    leagueId: number;
+    marketId: string;
+    tokenId: string | null;
+    question: string;
+    outcome: string;
+    stake: number;
+    price: number;
+  }): PlaceResult => {
+    const m = db
+      .prepare("SELECT cash FROM memberships WHERE user_id = ? AND league_id = ?")
+      .get(p.userId, p.leagueId) as { cash: number } | undefined;
+    if (!m) return { ok: false, error: "you're not in that league" };
+    if (m.cash < p.stake) {
+      return { ok: false, error: `not enough cash, you have $${m.cash.toFixed(2)}` };
+    }
+    const shares = p.stake / p.price;
+    const cash = m.cash - p.stake;
+    db.prepare(
+      "UPDATE memberships SET cash = ? WHERE user_id = ? AND league_id = ?",
+    ).run(cash, p.userId, p.leagueId);
+    db.prepare(
+      `INSERT INTO picks (user_id, league_id, market_id, token_id, question, outcome,
+                          stake, shares, entry_price)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      p.userId, p.leagueId, p.marketId, p.tokenId, p.question, p.outcome,
+      p.stake, shares, p.price,
+    );
+    return { ok: true, shares, cash };
+  },
+);
+
+export type Position = {
+  userId: number;
+  question: string;
+  outcome: string;
+  stake: number;
+  shares: number;
+  price: number; // current cached price, or entry price if the market is not cached
+  value: number;
+};
+
+function loadPositions(leagueId: number, userId?: number): Position[] {
+  const rows = db
+    .prepare(
+      `SELECT p.user_id, p.question, p.outcome, p.stake, p.shares, p.entry_price,
+              m.outcomes, m.last_prices
+       FROM picks p LEFT JOIN markets m ON m.market_id = p.market_id
+       WHERE p.league_id = ? AND p.status = 'open' AND (? IS NULL OR p.user_id = ?)
+       ORDER BY p.id`,
+    )
+    .all(leagueId, userId ?? null, userId ?? null) as {
+    user_id: number;
+    question: string;
+    outcome: string;
+    stake: number;
+    shares: number;
+    entry_price: number;
+    outcomes: string | null;
+    last_prices: string | null;
+  }[];
+
+  return rows.map((r) => {
+    let price = r.entry_price;
+    if (r.outcomes && r.last_prices) {
+      const i = (JSON.parse(r.outcomes) as string[]).indexOf(r.outcome);
+      const cached = (JSON.parse(r.last_prices) as number[])[i];
+      if (i >= 0 && typeof cached === "number") price = cached;
+    }
+    return {
+      userId: r.user_id,
+      question: r.question,
+      outcome: r.outcome,
+      stake: r.stake,
+      shares: r.shares,
+      price,
+      value: r.shares * price,
+    };
+  });
+}
+
+export function getPortfolio(userId: number, leagueId: number) {
+  const row = db
+    .prepare("SELECT cash FROM memberships WHERE user_id = ? AND league_id = ?")
+    .get(userId, leagueId) as { cash: number } | undefined;
+  return { cash: row?.cash ?? 0, positions: loadPositions(leagueId, userId) };
+}
+
+export type Standing = {
+  name: string;
+  cash: number;
+  inPlay: number;
+  total: number;
+  pct: number;
+};
+
+// Computed on every call, never stored. Prices come from the `markets` cache,
+// so refresh it first when freshness matters.
+export function getLeaderboard(leagueId: number): Standing[] {
+  const league = db
+    .prepare("SELECT starting_cash FROM leagues WHERE id = ?")
+    .get(leagueId) as { starting_cash: number } | undefined;
+  if (!league) return [];
+  const members = db
+    .prepare(
+      `SELECT m.user_id, COALESCE(u.name, 'Someone') AS name, m.cash
+       FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.league_id = ?`,
+    )
+    .all(leagueId) as { user_id: number; name: string; cash: number }[];
+
+  const inPlay = new Map<number, number>();
+  for (const p of loadPositions(leagueId)) {
+    inPlay.set(p.userId, (inPlay.get(p.userId) ?? 0) + p.value);
+  }
+  return members
+    .map((m) => {
+      const play = inPlay.get(m.user_id) ?? 0;
+      const total = m.cash + play;
+      return {
+        name: m.name,
+        cash: m.cash,
+        inPlay: play,
+        total,
+        pct: ((total - league.starting_cash) / league.starting_cash) * 100,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+}
+
+// Only leagues the player belongs to, so one league cannot read another's data
+// by guessing its name. Prefers the active league if two share a name.
+export function findMemberLeague(
+  userId: number,
+  name: string,
+): { id: number; name: string } | null {
+  const row = db
+    .prepare(
+      `SELECT l.id, l.name
+       FROM memberships m
+       JOIN leagues l ON l.id = m.league_id
+       LEFT JOIN users u ON u.id = m.user_id AND u.active_league_id = l.id
+       WHERE m.user_id = ? AND lower(l.name) = lower(?)
+       ORDER BY u.id IS NULL
+       LIMIT 1`,
+    )
+    .get(userId, name.trim()) as { id: number; name: string } | undefined;
+  return row ?? null;
+}
+
+export function openMarketIds(leagueId: number): string[] {
+  const rows = db
+    .prepare(
+      "SELECT DISTINCT market_id FROM picks WHERE league_id = ? AND status = 'open'",
+    )
+    .all(leagueId) as { market_id: string }[];
+  return rows.map((r) => r.market_id);
+}
+
+// Display names only. Phone numbers never leave the server.
+export function getLeagueMemberNames(leagueId: number): string[] {
+  const rows = db
+    .prepare(
+      `SELECT COALESCE(u.name, 'Someone') AS name
+       FROM memberships m JOIN users u ON u.id = m.user_id
+       WHERE m.league_id = ? ORDER BY u.id`,
+    )
+    .all(leagueId) as { name: string }[];
+  return rows.map((r) => r.name);
+}
+
 export function logMessage(
   userId: number,
   role: "user" | "assistant",

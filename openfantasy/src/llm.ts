@@ -1,4 +1,12 @@
-import { getRecentMessages, upsertMarket } from "./db.js";
+import {
+  createLeague,
+  getPlayer,
+  getRecentMessages,
+  joinLeague,
+  setName,
+  upsertMarket,
+} from "./db.js";
+import { proposePick } from "./picks.js";
 import { searchMarkets } from "./polymarket.js";
 
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -21,7 +29,10 @@ Rules:
 - Never state a price, percentage or number that did not come from a tool result. If a tool reports an error, say Polymarket isn't responding and do not guess.
 - Prices are probabilities: 0.62 means a 62% chance. Say it as a percentage.
 - If several markets match, show at most three and ask which one the player means.
-- If nothing matches, say so and suggest different keywords.`;
+- If nothing matches, say so and suggest different keywords.
+- To place a pick, call propose_pick with the market_id, outcome and stake the player gave. If they have not given a stake, ask for it. When it succeeds, repeat its message and tell them to reply yes to lock it in. You cannot confirm a pick yourself.
+- You cannot show a leaderboard or portfolio. Tell the player to text "leaderboard" or "portfolio".
+- Commands the player can text: mkt <keywords>, bet <#> <yes/no> <$>, leaderboard, portfolio.`;
 
 type ToolCall = {
   id: string;
@@ -35,57 +46,148 @@ type ChatMessage =
   | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
   | { role: "tool"; tool_call_id: string; content: string };
 
-const TOOLS = [
-  {
+function stringTool(name: string, description: string, param: string, hint: string) {
+  return {
     type: "function",
     function: {
-      name: "search_markets",
-      description:
-        "Search open Polymarket markets by keywords. Returns up to 3 markets with outcomes and current prices.",
+      name,
+      description,
       parameters: {
         type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "Two or three plain keywords, e.g. 'fed rate cut'",
-          },
-        },
-        required: ["query"],
+        properties: { [param]: { type: "string", description: hint } },
+        required: [param],
       },
     },
-  },
+  };
+}
+
+const TOOLS = [
+  stringTool(
+    "search_markets",
+    "Search open Polymarket markets by keywords. Returns up to 3 markets with outcomes and current prices.",
+    "query",
+    "Two or three plain keywords, e.g. 'fed rate cut'",
+  ),
+  stringTool(
+    "set_name",
+    "Save the player's display name. Call it when the player tells you what to call them.",
+    "name",
+    "The name as the player gave it",
+  ),
+  stringTool(
+    "create_league",
+    "Create a new league with the player as its first member. Returns the join code to share.",
+    "name",
+    "League name",
+  ),
+  stringTool(
+    "join_league",
+    "Join an existing league using its join code.",
+    "code",
+    "The join code, e.g. HEELS",
+  ),
 ];
 
-async function runTool(call: ToolCall): Promise<string> {
-  let args: { query?: unknown };
+TOOLS.push({
+  type: "function",
+  function: {
+    name: "propose_pick",
+    description:
+      "Propose a pick for the player. Nothing is saved until the player texts yes, which the server handles. Use a market_id from search_markets and an outcome label exactly as listed there.",
+    parameters: {
+      type: "object",
+      properties: {
+        market_id: { type: "string", description: "market_id from search_markets" },
+        outcome: { type: "string", description: "Outcome label, e.g. Yes" },
+        stake: { type: "number", description: "Play-money dollars to stake" },
+      },
+      required: ["market_id", "outcome", "stake"],
+    },
+  },
+} as (typeof TOOLS)[number]);
+
+// Tools take only what the model may choose. userId comes from the server.
+type Handler = (userId: number, value: string) => Promise<unknown> | unknown;
+
+const HANDLERS: Record<string, { param: string; run: Handler }> = {
+  search_markets: {
+    param: "query",
+    run: async (_userId, query) => {
+      try {
+        const markets = await searchMarkets(query);
+        for (const m of markets) upsertMarket(m);
+        return markets.map((m) => ({
+          market_id: m.id,
+          question: m.question,
+          outcomes: m.outcomes,
+          prices: m.prices,
+        }));
+      } catch (err) {
+        console.error("search_markets failed:", err);
+        return { error: "Polymarket is unreachable right now" };
+      }
+    },
+  },
+  set_name: {
+    param: "name",
+    run: (userId, name) => {
+      setName(userId, name.slice(0, 40));
+      return { ok: true };
+    },
+  },
+  create_league: {
+    param: "name",
+    run: (userId, name) => createLeague(userId, name.slice(0, 40)),
+  },
+  join_league: {
+    param: "code",
+    run: (userId, code) => joinLeague(userId, code),
+  },
+};
+
+async function runTool(userId: number, call: ToolCall): Promise<string> {
+  if (call.function.name === "propose_pick") {
+    let a: Record<string, unknown>;
+    try {
+      a = JSON.parse(call.function.arguments);
+    } catch {
+      return JSON.stringify({ error: "arguments were not valid JSON" });
+    }
+    if (typeof a.market_id !== "string" || typeof a.outcome !== "string") {
+      return JSON.stringify({ error: "market_id and outcome must be strings" });
+    }
+    return JSON.stringify(
+      await proposePick(userId, a.market_id, a.outcome, Number(a.stake)),
+    );
+  }
+
+  const handler = HANDLERS[call.function.name];
+  if (!handler) {
+    return JSON.stringify({ error: `unknown tool ${call.function.name}` });
+  }
+  let args: Record<string, unknown>;
   try {
     args = JSON.parse(call.function.arguments);
   } catch {
     return JSON.stringify({ error: "arguments were not valid JSON" });
   }
+  const value = args[handler.param];
+  if (typeof value !== "string" || !value.trim()) {
+    return JSON.stringify({ error: `${handler.param} must be a non-empty string` });
+  }
+  return JSON.stringify(await handler.run(userId, value.trim()));
+}
 
-  if (call.function.name !== "search_markets") {
-    return JSON.stringify({ error: `unknown tool ${call.function.name}` });
+// Built by the server on every turn so the model knows which onboarding step is next.
+function playerContext(userId: number): string {
+  const p = getPlayer(userId);
+  if (!p.name) {
+    return "Player state: no name yet. Ask what to call them, then call set_name.";
   }
-  if (typeof args.query !== "string" || !args.query.trim()) {
-    return JSON.stringify({ error: "query must be a non-empty string" });
+  if (!p.league) {
+    return `Player state: name is ${p.name}, not in a league. Tell them to text 'create <league name>' to start one or 'join <code>' if a friend sent a code.`;
   }
-
-  try {
-    const markets = await searchMarkets(args.query);
-    for (const m of markets) upsertMarket(m);
-    return JSON.stringify(
-      markets.map((m) => ({
-        market_id: m.id,
-        question: m.question,
-        outcomes: m.outcomes,
-        prices: m.prices,
-      })),
-    );
-  } catch (err) {
-    console.error("search_markets failed:", err);
-    return JSON.stringify({ error: "Polymarket is unreachable right now" });
-  }
+  return `Player state: name is ${p.name}, in league "${p.league.name}" (join code ${p.league.joinCode}) with $${p.league.cash.toFixed(2)} cash.`;
 }
 
 type ChatResponse = {
@@ -122,7 +224,7 @@ async function callGemini(messages: ChatMessage[]): Promise<ChatResponse> {
 // userId is set by the server and is never a tool parameter.
 export async function runAgent(userId: number, text: string): Promise<string> {
   const messages: ChatMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: `${SYSTEM_PROMPT}\n\n${playerContext(userId)}` },
     ...getRecentMessages(userId, HISTORY_LIMIT).map(
       (m): ChatMessage => ({ role: m.role, content: m.text }),
     ),
@@ -144,7 +246,7 @@ export async function runAgent(userId: number, text: string): Promise<string> {
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: await runTool(call),
+        content: await runTool(userId, call),
       });
     }
   }

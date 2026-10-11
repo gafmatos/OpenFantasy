@@ -74,6 +74,24 @@ export async function getMarket(id: string): Promise<Market | null> {
     return parseMarket((await res.json()) as RawMarket);
 }
 
+// Most active open markets right now. UNVERIFIED against the live API: the
+// order=volume24hr parameter could not be checked from the dev sandbox.
+export async function topMarkets(): Promise<Market[]> {
+    const res = await fetch(
+        `${GAMMA_URL}/markets?closed=false&order=volume24hr&ascending=false&limit=30`,
+        { signal: AbortSignal.timeout(5000) },
+    );
+    if (!res.ok) throw new Error(`Polymarket top markets failed: ${res.status}`);
+    const raws = (await res.json()) as RawMarket[];
+    const markets: Market[] = [];
+    for (const raw of raws) {
+        const market = parseMarket(raw);
+        if (market) markets.push(market);
+        if (markets.length === MAX_RESULTS) break;
+    }
+    return markets;
+}
+
 export async function searchMarkets(query: string): Promise<Market[]> {
     // Filler words like "odds" get matched literally by Polymarket's search
     // ("Odds BK" markets), so search with the meaningful words only.
