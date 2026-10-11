@@ -126,8 +126,7 @@ async function runLeaderboard(userId: number, leagueName: string): Promise<strin
     const sign = s.pct >= 0 ? "+" : "";
     return `${i + 1}. ${s.name} ${money0(s.total)} (${money0(s.cash)} cash, ${money0(s.inPlay)} in play), ${sign}${s.pct.toFixed(1)}%`;
   });
-  const title = leagueName ? `${league.name}\n` : "";
-  return title + rows.join("\n") + (fresh ? "" : STALE);
+  return `${league.name}\n` + rows.join("\n") + (fresh ? "" : STALE);
 }
 
 async function runPortfolio(userId: number): Promise<string> {
